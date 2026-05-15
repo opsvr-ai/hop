@@ -33,7 +33,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -218,6 +218,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     handoff_state TEXT,
     handoff_platform TEXT,
     handoff_error TEXT,
+    space_id TEXT,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
 
@@ -248,6 +249,47 @@ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_sessions_space_id ON sessions(space_id);
+
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    login_type TEXT NOT NULL CHECK(login_type IN ('ldap','local')),
+    username TEXT NOT NULL UNIQUE,
+    display_name TEXT,
+    email TEXT,
+    department TEXT,
+    is_admin INTEGER DEFAULT 0,
+    password_hash TEXT,
+    created_at REAL NOT NULL,
+    last_login_at REAL
+);
+
+CREATE TABLE IF NOT EXISTS spaces (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    owner_id TEXT NOT NULL REFERENCES users(id),
+    type TEXT NOT NULL DEFAULT 'project' CHECK(type IN ('personal','project')),
+    created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS space_memberships (
+    user_id TEXT NOT NULL REFERENCES users(id),
+    space_id TEXT NOT NULL REFERENCES spaces(id),
+    role TEXT NOT NULL DEFAULT 'member' CHECK(role IN ('owner','admin','member')),
+    joined_at REAL NOT NULL,
+    PRIMARY KEY (user_id, space_id)
+);
+
+CREATE TABLE IF NOT EXISTS space_invites (
+    id TEXT PRIMARY KEY,
+    space_id TEXT NOT NULL REFERENCES spaces(id),
+    created_by TEXT NOT NULL REFERENCES users(id),
+    expires_at REAL,
+    max_uses INTEGER,
+    use_count INTEGER DEFAULT 0,
+    created_at REAL NOT NULL
+);
 """
 
 FTS_SQL = """
