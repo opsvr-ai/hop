@@ -33,8 +33,10 @@ import os
 import socket as _socket
 import re
 import sqlite3
+import threading
 import time
 import uuid
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
 try:
@@ -616,6 +618,12 @@ class APIServerAdapter(BasePlatformAdapter):
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        # Agent cache: reuse AIAgent instances across turns of the same conversation
+        # Keyed by session_id, stores (agent, last_access_timestamp)
+        self._agent_cache: "OrderedDict[str, tuple[Any, float]]" = OrderedDict()
+        self._agent_cache_lock = threading.Lock()
+        self._agent_cache_max = int(os.getenv("HERMES_AGENT_CACHE_MAX", "32"))
+        self._agent_cache_ttl = int(os.getenv("HERMES_AGENT_CACHE_TTL", "600"))
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -2758,7 +2766,12 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key: Optional[str] = None,
     ) -> tuple:
         """
-        Create an agent and run a conversation in a thread executor.
+        Create or reuse an agent and run a conversation in a thread executor.
+
+        Agents are cached by *session_id* so that multi-turn conversations
+        avoid cold-start overhead on every request.  Cache entries expire
+        after ``HERMES_AGENT_CACHE_TTL`` seconds (default 600) and the cache
+        is LRU-evicted at ``HERMES_AGENT_CACHE_MAX`` entries (default 32).
 
         Returns ``(result_dict, usage_dict)`` where *usage_dict* contains
         ``input_tokens``, ``output_tokens`` and ``total_tokens``.
@@ -2771,18 +2784,55 @@ class APIServerAdapter(BasePlatformAdapter):
         loop = asyncio.get_running_loop()
 
         def _run():
-            agent = self._create_agent(
-                ephemeral_system_prompt=ephemeral_system_prompt,
-                session_id=session_id,
-                stream_delta_callback=stream_delta_callback,
-                tool_progress_callback=tool_progress_callback,
-                tool_start_callback=tool_start_callback,
-                tool_complete_callback=tool_complete_callback,
-                gateway_session_key=gateway_session_key,
-            )
-            if agent_ref is not None:
-                agent_ref[0] = agent
-            effective_task_id = session_id or str(uuid.uuid4())
+            nonlocal session_id
+            agent = None
+            effective_session_id = session_id
+
+            # ── Check agent cache ────────────────────────────────────
+            if effective_session_id:
+                with self._agent_cache_lock:
+                    entry = self._agent_cache.get(effective_session_id)
+                    if entry is not None:
+                        cached_agent, last_access = entry
+                        if time.time() - last_access < self._agent_cache_ttl:
+                            agent = cached_agent
+                            self._agent_cache.move_to_end(effective_session_id)
+                        else:
+                            # TTL expired — evict
+                            del self._agent_cache[effective_session_id]
+
+            if agent is not None:
+                # Reuse cached agent: update per-request callbacks, then run
+                agent.stream_delta_callback = stream_delta_callback
+                agent.tool_progress_callback = tool_progress_callback
+                agent.tool_start_callback = tool_start_callback
+                agent.tool_complete_callback = tool_complete_callback
+                if agent_ref is not None:
+                    agent_ref[0] = agent
+            else:
+                # Cold start: create a new agent
+                agent = self._create_agent(
+                    ephemeral_system_prompt=ephemeral_system_prompt,
+                    session_id=effective_session_id,
+                    stream_delta_callback=stream_delta_callback,
+                    tool_progress_callback=tool_progress_callback,
+                    tool_start_callback=tool_start_callback,
+                    tool_complete_callback=tool_complete_callback,
+                    gateway_session_key=gateway_session_key,
+                )
+                if agent_ref is not None:
+                    agent_ref[0] = agent
+
+                # Cache the new agent
+                if effective_session_id:
+                    with self._agent_cache_lock:
+                        self._agent_cache[effective_session_id] = (agent, time.time())
+                        self._agent_cache.move_to_end(effective_session_id)
+                        # LRU eviction
+                        while len(self._agent_cache) > self._agent_cache_max:
+                            self._agent_cache.popitem(last=False)
+
+            effective_task_id = effective_session_id or str(uuid.uuid4())
             result = agent.run_conversation(
                 user_message=user_message,
                 conversation_history=conversation_history,
@@ -2796,7 +2846,7 @@ class APIServerAdapter(BasePlatformAdapter):
             # Include the effective session ID in the result so callers
             # (e.g. X-Hermes-Session-Id header) can track compression-
             # triggered session rotations. (#16938)
-            _eff_sid = getattr(agent, "session_id", session_id)
+            _eff_sid = getattr(agent, "session_id", effective_session_id)
             if isinstance(_eff_sid, str) and _eff_sid:
                 result["session_id"] = _eff_sid
             return result, usage
