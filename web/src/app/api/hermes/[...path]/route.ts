@@ -35,6 +35,11 @@ async function proxyRequest(
       headers["X-Hermes-Space"] = spaceId;
     }
   }
+  // Forward session continuity header from client
+  const clientSessionId = req.headers.get("X-Hermes-Session-Id");
+  if (clientSessionId) {
+    headers["X-Hermes-Session-Id"] = clientSessionId;
+  }
 
   const upstreamUrl = `${HERMES_BASE}/${upstreamPath}`;
 

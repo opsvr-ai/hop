@@ -105,6 +105,7 @@ export function useChatStream(opts: UseChatStreamOptions = {}) {
   const [isLoading, setIsLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const messagesRef = useRef<ChatMessage[]>([]);
+  const sessionIdRef = useRef<string | null>(null);
 
   // keep the ref in sync so the async callback always reads latest state
   messagesRef.current = messages;
@@ -171,9 +172,14 @@ export function useChatStream(opts: UseChatStreamOptions = {}) {
       });
 
       try {
+        const requestHeaders: Record<string, string> = { "Content-Type": "application/json" };
+        // Send session ID for multi-turn continuity (agent reuse + history loading)
+        if (sessionIdRef.current) {
+          requestHeaders["X-Hermes-Session-Id"] = sessionIdRef.current;
+        }
         const response = await fetch(apiPath, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: requestHeaders,
           body: JSON.stringify({
             model,
             messages: apiMessages,
@@ -185,6 +191,12 @@ export function useChatStream(opts: UseChatStreamOptions = {}) {
         if (!response.ok) {
           const err = await response.text();
           throw new Error(`API error (${response.status}): ${err}`);
+        }
+
+        // Capture session ID from response header for multi-turn continuity
+        const newSessionId = response.headers.get("X-Hermes-Session-Id");
+        if (newSessionId) {
+          sessionIdRef.current = newSessionId;
         }
 
         const reader = response.body?.getReader();
@@ -361,6 +373,7 @@ export function useChatStream(opts: UseChatStreamOptions = {}) {
   const clearMessages = useCallback(() => {
     setMessages([]);
     msgCounter = 0;
+    sessionIdRef.current = null;
   }, []);
 
   return { messages, isLoading, sendMessage, stop, loadMessages, clearMessages };
