@@ -1,6 +1,6 @@
-# Hermes Agent - Development Guide
+# hop - Development Guide
 
-Instructions for AI coding assistants and developers working on the hermes-agent codebase.
+Instructions for AI coding assistants and developers working on the hop codebase (built on Hermes Agent).
 
 ## Development Environment
 
