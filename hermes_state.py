@@ -690,6 +690,54 @@ class SessionDB:
                     "COALESCE(tool_calls, '') "
                     "FROM messages"
                 )
+            if current_version < 12:
+                # v12: backfill personal spaces for existing users and assign
+                # space_id to orphaned sessions.  Users created before the
+                # multi-space schema had no personal space — create one for
+                # each with type "personal".  Then point any session without
+                # a space_id to its owner's personal space.
+                try:
+                    # 1. Create personal spaces for users missing one
+                    orphan_users = cursor.execute(
+                        "SELECT u.id FROM users u "
+                        "LEFT JOIN space_memberships sm ON sm.user_id = u.id "
+                        "JOIN spaces s ON s.id = sm.space_id AND s.type = 'personal' "
+                        "WHERE sm.user_id IS NULL"
+                    ).fetchall()
+                    for (uid,) in orphan_users:
+                        import uuid as _uuid
+                        import time as _time
+                        space_id = _uuid.uuid4().hex[:12]
+                        now = int(_time.time())
+                        cursor.execute(
+                            "INSERT INTO spaces (id, name, type, owner_id, created_at, updated_at) "
+                            "VALUES (?, ?, 'personal', ?, ?, ?)",
+                            (space_id, "我的空间", uid, now, now),
+                        )
+                        cursor.execute(
+                            "INSERT INTO space_memberships (user_id, space_id, role, joined_at) "
+                            "VALUES (?, ?, 'owner', ?)",
+                            (uid, space_id, now),
+                        )
+                    # 2. Assign orphaned sessions to owner's personal space
+                    orphan_sessions = cursor.execute(
+                        "SELECT s.id, s.user_id FROM sessions s "
+                        "WHERE s.space_id IS NULL AND s.user_id IS NOT NULL"
+                    ).fetchall()
+                    for (sid, uid) in orphan_sessions:
+                        personal = cursor.execute(
+                            "SELECT sm.space_id FROM space_memberships sm "
+                            "JOIN spaces s2 ON s2.id = sm.space_id "
+                            "WHERE sm.user_id = ? AND s2.type = 'personal'",
+                            (uid,),
+                        ).fetchone()
+                        if personal:
+                            cursor.execute(
+                                "UPDATE sessions SET space_id = ? WHERE id = ?",
+                                (personal[0], sid),
+                            )
+                except Exception as exc:
+                    logger.warning("v12 data migration error (non-fatal): %s", exc)
             if current_version < SCHEMA_VERSION:
                 cursor.execute(
                     "UPDATE schema_version SET version = ?",
