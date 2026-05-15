@@ -792,6 +792,32 @@ class APIServerAdapter(BasePlatformAdapter):
         return self._session_db
 
     # ------------------------------------------------------------------
+    # User / Space header helpers
+    # ------------------------------------------------------------------
+
+    def _extract_user_id(self, request: "web.Request") -> Optional[str]:
+        return request.headers.get("X-Hermes-User", "").strip() or None
+
+    def _extract_space_id(self, request: "web.Request") -> Optional[str]:
+        return request.headers.get("X-Hermes-Space", "").strip() or None
+
+    def _require_user(self, request: "web.Request") -> str:
+        user_id = self._extract_user_id(request)
+        if not user_id:
+            raise web.HTTPUnauthorized(reason="X-Hermes-User header required")
+        return user_id
+
+    def _load_config(self) -> dict:
+        """Load current hermes config (lazy, cached per process)."""
+        if not hasattr(self, "_cached_config"):
+            try:
+                from hermes_cli.config import load_config
+                self._cached_config = load_config()
+            except Exception:
+                self._cached_config = {}
+        return self._cached_config
+
+    # ------------------------------------------------------------------
     # Agent creation helper
     # ------------------------------------------------------------------
 
@@ -3328,6 +3354,403 @@ class APIServerAdapter(BasePlatformAdapter):
                 self._run_statuses.pop(run_id, None)
 
     # ------------------------------------------------------------------
+    # Auth handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_auth_has_admin(self, request: "web.Request") -> "web.Response":
+        db = self._ensure_session_db()
+        if db is None:
+            return web.json_response({"has_admin": False})
+        return web.json_response({"has_admin": db.has_admin()})
+
+    async def _handle_auth_init(self, request: "web.Request") -> "web.Response":
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text=json.dumps({"error": "Invalid JSON"}))
+        username = (body.get("username") or "").strip()
+        password = (body.get("password") or "").strip()
+        if not username or not password:
+            raise web.HTTPBadRequest(text=json.dumps({"error": "username and password required"}))
+        if len(password) < 8:
+            raise web.HTTPBadRequest(text=json.dumps({"error": "Password must be at least 8 characters"}))
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        if db.has_admin():
+            raise web.HTTPForbidden(text=json.dumps({"error": "Admin already exists"}))
+        if db.get_user_by_username(username):
+            raise web.HTTPConflict(text=json.dumps({"error": "Username already taken"}))
+        import bcrypt
+        pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        user = db.create_local_user(username, pw_hash, display_name=username, is_admin=1)
+        return web.json_response({"ok": True, "user": {"id": user["id"], "username": user["username"]}})
+
+    async def _handle_auth_ldap(self, request: "web.Request") -> "web.Response":
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text=json.dumps({"error": "Invalid JSON"}))
+        username = (body.get("username") or "").strip()
+        password = (body.get("password") or "").strip()
+        if not username or not password:
+            raise web.HTTPBadRequest(text=json.dumps({"error": "username and password required"}))
+        config = self._load_config()
+        ldap_cfg = config.get("ldap", {})
+        url = ldap_cfg.get("url", "")
+        bind_dn_tpl = ldap_cfg.get("bindDN", "")
+        admin_group = ldap_cfg.get("adminGroup", "")
+        if not url:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "LDAP not configured"}))
+        try:
+            import ldap3
+            server = ldap3.Server(url, get_info=ldap3.NONE)
+            user_dn = bind_dn_tpl.replace("%s", ldap3.utils.dn.escape_attribute_value(username))
+            conn = ldap3.Connection(server, user_dn, password, auto_bind=True, receive_timeout=10)
+            is_admin = 0
+            if admin_group:
+                try:
+                    member_filter = f"(member={ldap3.utils.dn.escape_rdn(user_dn)})"
+                    is_admin = 1 if conn.search(admin_group, member_filter, search_scope=ldap3.BASE, size_limit=1) else 0
+                except Exception:
+                    is_admin = 0
+            attrs = {}
+            base_dn = ldap_cfg.get("baseDN", "")
+            user_filter_tpl = ldap_cfg.get("userFilter", "(sAMAccountName=%s)")
+            user_filter = user_filter_tpl.replace("%s", ldap3.utils.dn.escape_attribute_value(username))
+            if base_dn:
+                try:
+                    conn.search(base_dn, user_filter, search_scope=ldap3.SUBTREE,
+                               attributes=[ldap_cfg.get("displayNameAttr", "displayName"),
+                                           ldap_cfg.get("emailAttr", "mail"),
+                                           ldap_cfg.get("deptAttr", "department")],
+                               size_limit=1)
+                    if conn.entries:
+                        entry = conn.entries[0]
+                        for attr_key, our_key in [
+                            ("displayNameAttr", "display_name"),
+                            ("emailAttr", "email"),
+                            ("deptAttr", "department"),
+                        ]:
+                            attr_name = ldap_cfg.get(attr_key, "")
+                            if attr_name and attr_name in entry:
+                                attrs[our_key] = str(entry[attr_name])
+                except Exception:
+                    pass
+            conn.unbind()
+            db = self._ensure_session_db()
+            if db is None:
+                raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+            user = db.upsert_ldap_user(username, attrs.get("display_name"),
+                                       attrs.get("email"), attrs.get("department"), is_admin)
+            personal = db.get_personal_space(user["id"])
+            return web.json_response({"user": {
+                "id": user["id"], "username": user["username"],
+                "display_name": user.get("display_name"), "email": user.get("email"),
+                "is_admin": user.get("is_admin"),
+                "personal_space_id": personal["id"] if personal else None
+            }})
+        except Exception as e:
+            return web.json_response({"error": f"LDAP auth failed: {str(e)}"}, status=401)
+
+    async def _handle_auth_local(self, request: "web.Request") -> "web.Response":
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text=json.dumps({"error": "Invalid JSON"}))
+        username = (body.get("username") or "").strip()
+        password = (body.get("password") or "").strip()
+        if not username or not password:
+            raise web.HTTPBadRequest(text=json.dumps({"error": "username and password required"}))
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        user = db.get_user_by_username_local(username)
+        if not user or not user.get("password_hash"):
+            return web.json_response({"error": "Invalid credentials"}, status=401)
+        import bcrypt
+        if not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
+            return web.json_response({"error": "Invalid credentials"}, status=401)
+        db.update_last_login(user["id"])
+        personal = db.get_personal_space(user["id"])
+        return web.json_response({"user": {
+            "id": user["id"], "username": user["username"],
+            "display_name": user.get("display_name"), "email": user.get("email"),
+            "is_admin": user.get("is_admin"),
+            "personal_space_id": personal["id"] if personal else None
+        }})
+
+    # ------------------------------------------------------------------
+    # User handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_users_me(self, request: "web.Request") -> "web.Response":
+        user_id = self._require_user(request)
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        user = db.get_user_by_id(user_id)
+        if not user:
+            raise web.HTTPNotFound(text=json.dumps({"error": "User not found"}))
+        personal = db.get_personal_space(user_id)
+        safe = {k: user.get(k) for k in ("id", "login_type", "username", "display_name", "email", "department", "is_admin")}
+        safe["personal_space_id"] = personal["id"] if personal else None
+        return web.json_response(safe)
+
+    async def _handle_users_list(self, request: "web.Request") -> "web.Response":
+        self._require_user(request)
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        limit = int(request.query.get("limit", 50))
+        offset = int(request.query.get("offset", 0))
+        users = db.list_users(limit=limit, offset=offset)
+        safe = [{k: u.get(k) for k in ("id", "login_type", "username", "display_name", "email", "department", "is_admin", "created_at", "last_login_at")} for u in users]
+        return web.json_response({"users": safe})
+
+    async def _handle_users_toggle_admin(self, request: "web.Request") -> "web.Response":
+        self._require_user(request)
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        target_id = request.match_info["user_id"]
+        user = db.toggle_admin(target_id)
+        if not user:
+            raise web.HTTPNotFound(text=json.dumps({"error": "User not found"}))
+        return web.json_response({"ok": True, "is_admin": user["is_admin"]})
+
+    # ------------------------------------------------------------------
+    # Space handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_spaces_list(self, request: "web.Request") -> "web.Response":
+        user_id = self._require_user(request)
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        spaces = db.list_user_spaces(user_id)
+        return web.json_response({"spaces": spaces})
+
+    async def _handle_spaces_create(self, request: "web.Request") -> "web.Response":
+        user_id = self._require_user(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text=json.dumps({"error": "Invalid JSON"}))
+        name = (body.get("name") or "").strip()
+        if not name:
+            raise web.HTTPBadRequest(text=json.dumps({"error": "name required"}))
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        space = db.create_space(name, user_id, body.get("description", ""))
+        return web.json_response(space, status=201)
+
+    async def _handle_space_get(self, request: "web.Request") -> "web.Response":
+        user_id = self._require_user(request)
+        space_id = request.match_info["space_id"]
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        space = db.get_space(space_id, user_id)
+        if not space:
+            raise web.HTTPNotFound(text=json.dumps({"error": "Space not found"}))
+        return web.json_response(space)
+
+    async def _handle_space_update(self, request: "web.Request") -> "web.Response":
+        user_id = self._require_user(request)
+        space_id = request.match_info["space_id"]
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text=json.dumps({"error": "Invalid JSON"}))
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        space = db.update_space(space_id, user_id, body.get("name"), body.get("description"))
+        if not space:
+            raise web.HTTPNotFound(text=json.dumps({"error": "Space not found or not authorized"}))
+        return web.json_response(space)
+
+    async def _handle_space_delete(self, request: "web.Request") -> "web.Response":
+        user_id = self._require_user(request)
+        space_id = request.match_info["space_id"]
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        if not db.delete_space(space_id, user_id):
+            raise web.HTTPForbidden(text=json.dumps({"error": "Cannot delete this space"}))
+        return web.json_response({"ok": True})
+
+    async def _handle_space_members(self, request: "web.Request") -> "web.Response":
+        user_id = self._require_user(request)
+        space_id = request.match_info["space_id"]
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        members = db.list_space_members(space_id, user_id)
+        if members is None:
+            raise web.HTTPNotFound(text=json.dumps({"error": "Space not found"}))
+        return web.json_response({"members": members})
+
+    async def _handle_space_member_update(self, request: "web.Request") -> "web.Response":
+        user_id = self._require_user(request)
+        space_id = request.match_info["space_id"]
+        target_id = request.match_info["user_id"]
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text=json.dumps({"error": "Invalid JSON"}))
+        role = body.get("role", "member")
+        if role not in ("admin", "member"):
+            raise web.HTTPBadRequest(text=json.dumps({"error": "role must be 'admin' or 'member'"}))
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        if not db.update_member_role(space_id, user_id, target_id, role):
+            raise web.HTTPForbidden(text=json.dumps({"error": "Not authorized"}))
+        return web.json_response({"ok": True})
+
+    async def _handle_space_member_remove(self, request: "web.Request") -> "web.Response":
+        user_id = self._require_user(request)
+        space_id = request.match_info["space_id"]
+        target_id = request.match_info["user_id"]
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        if not db.remove_member(space_id, user_id, target_id):
+            raise web.HTTPForbidden(text=json.dumps({"error": "Not authorized"}))
+        return web.json_response({"ok": True})
+
+    # ------------------------------------------------------------------
+    # Invite handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_invite_create(self, request: "web.Request") -> "web.Response":
+        user_id = self._require_user(request)
+        space_id = request.match_info["space_id"]
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        inv = db.create_invite(space_id, user_id, body.get("max_uses"), body.get("expires_in_hours"))
+        if not inv:
+            raise web.HTTPForbidden(text=json.dumps({"error": "Not authorized"}))
+        return web.json_response({"invite_url": f"/join/{inv['id']}", "invite": inv}, status=201)
+
+    async def _handle_invite_list(self, request: "web.Request") -> "web.Response":
+        user_id = self._require_user(request)
+        space_id = request.match_info["space_id"]
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        invites = db.list_space_invites(space_id, user_id)
+        if invites is None:
+            raise web.HTTPForbidden(text=json.dumps({"error": "Not authorized"}))
+        return web.json_response({"invites": invites})
+
+    async def _handle_invite_revoke(self, request: "web.Request") -> "web.Response":
+        user_id = self._require_user(request)
+        space_id = request.match_info["space_id"]
+        invite_id = request.match_info["invite_id"]
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        if not db.revoke_invite(space_id, invite_id, user_id):
+            raise web.HTTPForbidden(text=json.dumps({"error": "Not authorized"}))
+        return web.json_response({"ok": True})
+
+    async def _handle_invite_preview(self, request: "web.Request") -> "web.Response":
+        token = request.match_info["token"]
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        inv = db.get_invite(token)
+        if not inv:
+            raise web.HTTPNotFound(text=json.dumps({"error": "Invite not found or expired"}))
+        return web.json_response({"space_name": inv.get("space_name", "")})
+
+    async def _handle_invite_accept(self, request: "web.Request") -> "web.Response":
+        user_id = self._require_user(request)
+        token = request.match_info["token"]
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        space = db.accept_invite(token, user_id)
+        if not space:
+            raise web.HTTPNotFound(text=json.dumps({"error": "Invite not found or expired"}))
+        return web.json_response({"space": space})
+
+    # ------------------------------------------------------------------
+    # Config handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_config_get(self, request: "web.Request") -> "web.Response":
+        config = self._load_config()
+        branding = config.get("branding", {})
+        ldap_cfg = config.get("ldap", {})
+        return web.json_response({
+            "name": branding.get("name", "Hermes Ops"),
+            "logo_url": branding.get("logo_url", ""),
+            "ldap": {
+                "url": ldap_cfg.get("url", ""),
+                "baseDN": ldap_cfg.get("baseDN", ""),
+                "bindDN": ldap_cfg.get("bindDN", ""),
+                "userFilter": ldap_cfg.get("userFilter", ""),
+                "displayNameAttr": ldap_cfg.get("displayNameAttr", "displayName"),
+                "emailAttr": ldap_cfg.get("emailAttr", "mail"),
+                "deptAttr": ldap_cfg.get("deptAttr", "department"),
+                "adminGroup": ldap_cfg.get("adminGroup", ""),
+            }
+        })
+
+    async def _handle_config_update(self, request: "web.Request") -> "web.Response":
+        user_id = self._require_user(request)
+        db = self._ensure_session_db()
+        if db is None:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": "Database unavailable"}))
+        user = db.get_user_by_id(user_id)
+        if not user or not user.get("is_admin"):
+            raise web.HTTPForbidden(text=json.dumps({"error": "Admin only"}))
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text=json.dumps({"error": "Invalid JSON"}))
+        config = self._load_config()
+        if "name" in body:
+            config.setdefault("branding", {})["name"] = body["name"]
+        if "ldap" in body:
+            config["ldap"] = {**config.get("ldap", {}), **body["ldap"]}
+        try:
+            from hermes_cli.config import save_config
+            save_config(config)
+        except Exception as e:
+            raise web.HTTPInternalServerError(text=json.dumps({"error": f"Failed to save config: {str(e)}"}))
+        return web.json_response({"ok": True})
+
+    async def _handle_ldap_test(self, request: "web.Request") -> "web.Response":
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text=json.dumps({"error": "Invalid JSON"}))
+        try:
+            import ldap3
+            server = ldap3.Server(body.get("url", ""), get_info=ldap3.NONE)
+            conn = ldap3.Connection(
+                server, body.get("bindDN", ""), body.get("bindPassword", ""),
+                auto_bind=True, receive_timeout=10
+            )
+            if body.get("adminGroup"):
+                conn.search(body["adminGroup"], "(objectClass=*)", search_scope=ldap3.BASE)
+            conn.unbind()
+            return web.json_response({"ok": True, "message": "Connection successful"})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+    # ------------------------------------------------------------------
     # BasePlatformAdapter interface
     # ------------------------------------------------------------------
 
@@ -3365,6 +3788,40 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/runs/{run_id}/events", self._handle_run_events)
             self._app.router.add_post("/v1/runs/{run_id}/approval", self._handle_run_approval)
             self._app.router.add_post("/v1/runs/{run_id}/stop", self._handle_stop_run)
+
+            # ── Auth endpoints ──
+            self._app.router.add_post("/v1/auth/init", self._handle_auth_init)
+            self._app.router.add_post("/v1/auth/ldap", self._handle_auth_ldap)
+            self._app.router.add_post("/v1/auth/local", self._handle_auth_local)
+            self._app.router.add_get("/v1/auth/has-admin", self._handle_auth_has_admin)
+
+            # ── User endpoints ──
+            self._app.router.add_get("/v1/users/me", self._handle_users_me)
+            self._app.router.add_get("/v1/users", self._handle_users_list)
+            self._app.router.add_patch("/v1/users/{user_id}/admin", self._handle_users_toggle_admin)
+
+            # ── Space endpoints ──
+            self._app.router.add_get("/v1/spaces", self._handle_spaces_list)
+            self._app.router.add_post("/v1/spaces", self._handle_spaces_create)
+            self._app.router.add_get("/v1/spaces/{space_id}", self._handle_space_get)
+            self._app.router.add_patch("/v1/spaces/{space_id}", self._handle_space_update)
+            self._app.router.add_delete("/v1/spaces/{space_id}", self._handle_space_delete)
+            self._app.router.add_get("/v1/spaces/{space_id}/members", self._handle_space_members)
+            self._app.router.add_patch("/v1/spaces/{space_id}/members/{user_id}", self._handle_space_member_update)
+            self._app.router.add_delete("/v1/spaces/{space_id}/members/{user_id}", self._handle_space_member_remove)
+
+            # ── Invite endpoints ──
+            self._app.router.add_post("/v1/spaces/{space_id}/invites", self._handle_invite_create)
+            self._app.router.add_get("/v1/spaces/{space_id}/invites", self._handle_invite_list)
+            self._app.router.add_delete("/v1/spaces/{space_id}/invites/{invite_id}", self._handle_invite_revoke)
+            self._app.router.add_get("/v1/invites/{token}", self._handle_invite_preview)
+            self._app.router.add_post("/v1/invites/{token}/join", self._handle_invite_accept)
+
+            # ── Config endpoints ──
+            self._app.router.add_get("/v1/config/branding", self._handle_config_get)
+            self._app.router.add_post("/v1/config/branding", self._handle_config_update)
+            self._app.router.add_post("/v1/config/ldap/test", self._handle_ldap_test)
+
             # Start background sweep to clean up orphaned (unconsumed) run streams
             sweep_task = asyncio.create_task(self._sweep_orphaned_runs())
             try:

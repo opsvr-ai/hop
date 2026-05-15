@@ -1567,6 +1567,23 @@ DEFAULT_CONFIG = {
         "servers": {},
     },
 
+    # Branding (platform customization)
+    "branding": {
+        "name": "Hermes Ops",
+    },
+
+    # LDAP (enterprise authentication)
+    "ldap": {
+        "url": "",
+        "baseDN": "",
+        "bindDN": "",
+        "userFilter": "(sAMAccountName=%s)",
+        "displayNameAttr": "displayName",
+        "emailAttr": "mail",
+        "deptAttr": "department",
+        "adminGroup": "",
+    },
+
     # Config schema version - bump this when adding new required fields
     "_config_version": 23,
 }
