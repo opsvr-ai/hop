@@ -3006,3 +3006,368 @@ class SessionDB:
             )
         self._execute_write(_do)
 
+    # =========================================================================
+    # User management
+    # =========================================================================
+
+    def upsert_ldap_user(self, username: str, display_name: str = None,
+                         email: str = None, department: str = None,
+                         is_admin: int = 0) -> dict:
+        """Insert or update LDAP user on login. Returns user dict."""
+        now = time.time()
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT id, is_admin FROM users WHERE username=? AND login_type='ldap'",
+                (username,)
+            ).fetchone()
+            if existing:
+                existing_is_admin = existing["is_admin"] if isinstance(existing, sqlite3.Row) else existing[1]
+                # Only promote to admin, never auto-demote
+                effective_admin = existing_is_admin or is_admin
+                self._conn.execute(
+                    "UPDATE users SET display_name=?, email=?, department=?, is_admin=?, last_login_at=? WHERE id=?",
+                    (display_name, email, department, effective_admin, now, existing["id"])
+                )
+                user_id = existing["id"]
+            else:
+                import uuid
+                user_id = str(uuid.uuid4())
+                self._conn.execute(
+                    "INSERT INTO users(id, login_type, username, display_name, email, department, is_admin, created_at, last_login_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (user_id, 'ldap', username, display_name, email, department, is_admin, now, now)
+                )
+                # Auto-create personal space
+                space_id = str(uuid.uuid4())
+                self._conn.execute(
+                    "INSERT INTO spaces(id, name, description, owner_id, type, created_at) VALUES(?,?,?,?,?,?)",
+                    (space_id, '我的空间', '', user_id, 'personal', now)
+                )
+                self._conn.execute(
+                    "INSERT INTO space_memberships(user_id, space_id, role, joined_at) VALUES(?,?,?,?)",
+                    (user_id, space_id, 'owner', now)
+                )
+            self._conn.commit()
+            return self.get_user_by_id(user_id)
+
+    def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+        return dict(row) if row else None
+
+    def get_user_by_username_local(self, username: str) -> Optional[Dict[str, Any]]:
+        """Get local user with password_hash (for credentials auth)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM users WHERE username=? AND login_type='local'",
+                (username,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create_local_user(self, username: str, password_hash: str,
+                          display_name: str = None, is_admin: int = 0) -> dict:
+        import uuid
+        now = time.time()
+        user_id = str(uuid.uuid4())
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO users(id, login_type, username, display_name, password_hash, is_admin, created_at, last_login_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (user_id, 'local', username, display_name, password_hash, is_admin, now, now)
+            )
+            # Auto-create personal space
+            space_id = str(uuid.uuid4())
+            self._conn.execute(
+                "INSERT INTO spaces(id, name, description, owner_id, type, created_at) VALUES(?,?,?,?,?,?)",
+                (space_id, '我的空间', '', user_id, 'personal', now)
+            )
+            self._conn.execute(
+                "INSERT INTO space_memberships(user_id, space_id, role, joined_at) VALUES(?,?,?,?)",
+                (user_id, space_id, 'owner', now)
+            )
+            self._conn.commit()
+        return self.get_user_by_id(user_id)
+
+    def has_admin(self) -> bool:
+        with self._lock:
+            row = self._conn.execute("SELECT 1 FROM users WHERE is_admin=1 LIMIT 1").fetchone()
+        return row is not None
+
+    def list_users(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, login_type, username, display_name, email, department, is_admin, created_at, last_login_at "
+                "FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (limit, offset)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def toggle_admin(self, user_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            self._conn.execute("UPDATE users SET is_admin = 1 - is_admin WHERE id=?", (user_id,))
+            self._conn.commit()
+            return self.get_user_by_id(user_id)
+
+    def update_last_login(self, user_id: str) -> None:
+        def _do(conn):
+            conn.execute("UPDATE users SET last_login_at=? WHERE id=?", (time.time(), user_id))
+        self._execute_write(_do)
+
+    # =========================================================================
+    # Space management
+    # =========================================================================
+
+    def create_space(self, name: str, owner_id: str, description: str = '') -> dict:
+        import uuid
+        now = time.time()
+        space_id = str(uuid.uuid4())
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO spaces(id, name, description, owner_id, type, created_at) VALUES(?,?,?,?,?,?)",
+                (space_id, name, description, owner_id, 'project', now)
+            )
+            self._conn.execute(
+                "INSERT INTO space_memberships(user_id, space_id, role, joined_at) VALUES(?,?,?,?)",
+                (owner_id, space_id, 'owner', now)
+            )
+            self._conn.commit()
+        return self.get_space(space_id, owner_id)
+
+    def get_space(self, space_id: str, user_id: str = None) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            if user_id:
+                row = self._conn.execute(
+                    "SELECT s.*, sm.role as member_role FROM spaces s "
+                    "JOIN space_memberships sm ON s.id=sm.space_id "
+                    "WHERE s.id=? AND sm.user_id=?",
+                    (space_id, user_id)
+                ).fetchone()
+            else:
+                row = self._conn.execute("SELECT * FROM spaces WHERE id=?", (space_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_personal_space(self, user_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM spaces WHERE owner_id=? AND type='personal'",
+                (user_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_user_spaces(self, user_id: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT s.*, sm.role FROM spaces s "
+                "JOIN space_memberships sm ON s.id=sm.space_id "
+                "WHERE sm.user_id=? ORDER BY s.type DESC, s.created_at ASC",
+                (user_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_space(self, space_id: str, user_id: str, name: str = None,
+                     description: str = None) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            member = self._conn.execute(
+                "SELECT role FROM space_memberships WHERE space_id=? AND user_id=? AND role IN ('owner','admin')",
+                (space_id, user_id)
+            ).fetchone()
+            if not member:
+                return None
+            if name is not None:
+                self._conn.execute("UPDATE spaces SET name=? WHERE id=?", (name, space_id))
+            if description is not None:
+                self._conn.execute("UPDATE spaces SET description=? WHERE id=?", (description, space_id))
+            self._conn.commit()
+        return self.get_space(space_id, user_id)
+
+    def delete_space(self, space_id: str, user_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT s.type, sm.role FROM spaces s "
+                "JOIN space_memberships sm ON s.id=sm.space_id "
+                "WHERE s.id=? AND sm.user_id=?",
+                (space_id, user_id)
+            ).fetchone()
+            if not row:
+                return False
+            rtype = row["type"] if isinstance(row, sqlite3.Row) else row[0]
+            rrole = row["role"] if isinstance(row, sqlite3.Row) else row[1]
+            if rtype == 'personal' or rrole != 'owner':
+                return False
+            self._conn.execute("DELETE FROM space_invites WHERE space_id=?", (space_id,))
+            self._conn.execute("DELETE FROM space_memberships WHERE space_id=?", (space_id,))
+            self._conn.execute("DELETE FROM spaces WHERE id=?", (space_id,))
+            self._conn.commit()
+        return True
+
+    def list_space_members(self, space_id: str, user_id: str) -> Optional[List[Dict[str, Any]]]:
+        with self._lock:
+            member = self._conn.execute(
+                "SELECT 1 FROM space_memberships WHERE space_id=? AND user_id=?",
+                (space_id, user_id)
+            ).fetchone()
+            if not member:
+                return None
+            rows = self._conn.execute(
+                "SELECT u.id, u.username, u.display_name, u.email, u.department, u.login_type, "
+                "sm.role, sm.joined_at FROM users u "
+                "JOIN space_memberships sm ON u.id=sm.user_id "
+                "WHERE sm.space_id=? ORDER BY sm.joined_at ASC",
+                (space_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_member_role(self, space_id: str, actor_id: str,
+                           target_user_id: str, new_role: str) -> bool:
+        with self._lock:
+            actor = self._conn.execute(
+                "SELECT role FROM space_memberships WHERE space_id=? AND user_id=? AND role IN ('owner','admin')",
+                (space_id, actor_id)
+            ).fetchone()
+            if not actor:
+                return False
+            target = self._conn.execute(
+                "SELECT role FROM space_memberships WHERE space_id=? AND user_id=?",
+                (space_id, target_user_id)
+            ).fetchone()
+            if not target:
+                return False
+            trole = target["role"] if isinstance(target, sqlite3.Row) else target[0]
+            if trole == 'owner':
+                return False
+            self._conn.execute(
+                "UPDATE space_memberships SET role=? WHERE space_id=? AND user_id=?",
+                (new_role, space_id, target_user_id)
+            )
+            self._conn.commit()
+        return True
+
+    def remove_member(self, space_id: str, actor_id: str, target_user_id: str) -> bool:
+        with self._lock:
+            actor = self._conn.execute(
+                "SELECT role FROM space_memberships WHERE space_id=? AND user_id=? AND role IN ('owner','admin')",
+                (space_id, actor_id)
+            ).fetchone()
+            if not actor:
+                return False
+            target = self._conn.execute(
+                "SELECT role FROM space_memberships WHERE space_id=? AND user_id=?",
+                (space_id, target_user_id)
+            ).fetchone()
+            if not target:
+                return False
+            trole = target["role"] if isinstance(target, sqlite3.Row) else target[0]
+            if trole == 'owner':
+                return False
+            self._conn.execute(
+                "DELETE FROM space_memberships WHERE space_id=? AND user_id=?",
+                (space_id, target_user_id)
+            )
+            self._conn.commit()
+        return True
+
+    def check_space_membership(self, space_id: str, user_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM space_memberships WHERE space_id=? AND user_id=?",
+                (space_id, user_id)
+            ).fetchone()
+        return row is not None
+
+    # =========================================================================
+    # Invite management
+    # =========================================================================
+
+    def create_invite(self, space_id: str, created_by: str, max_uses: int = None,
+                      expires_in_hours: int = None) -> Optional[Dict[str, Any]]:
+        import secrets
+        with self._lock:
+            member = self._conn.execute(
+                "SELECT role FROM space_memberships WHERE space_id=? AND user_id=? AND role IN ('owner','admin')",
+                (space_id, created_by)
+            ).fetchone()
+            if not member:
+                return None
+            now = time.time()
+            token = secrets.token_urlsafe(24)
+            expires_at = (now + expires_in_hours * 3600) if expires_in_hours else None
+            self._conn.execute(
+                "INSERT INTO space_invites(id, space_id, created_by, expires_at, max_uses, created_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (token, space_id, created_by, expires_at, max_uses, now)
+            )
+            self._conn.commit()
+        return self.get_invite(token)
+
+    def get_invite(self, token: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT inv.*, s.name as space_name FROM space_invites inv "
+                "JOIN spaces s ON inv.space_id=s.id WHERE inv.id=?",
+                (token,)
+            ).fetchone()
+        if not row:
+            return None
+        inv = dict(row)
+        if inv.get("expires_at") and inv["expires_at"] < time.time():
+            return None
+        if inv.get("max_uses") and inv.get("use_count", 0) >= inv["max_uses"]:
+            return None
+        return inv
+
+    def accept_invite(self, token: str, user_id: str) -> Optional[Dict[str, Any]]:
+        inv = self.get_invite(token)
+        if not inv:
+            return None
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT 1 FROM space_memberships WHERE space_id=? AND user_id=?",
+                (inv["space_id"], user_id)
+            ).fetchone()
+            if existing:
+                return self.get_space(inv["space_id"], user_id)
+            self._conn.execute(
+                "INSERT INTO space_memberships(user_id, space_id, role, joined_at) VALUES(?,?,?,?)",
+                (user_id, inv["space_id"], 'member', time.time())
+            )
+            self._conn.execute(
+                "UPDATE space_invites SET use_count = use_count + 1 WHERE id=?",
+                (token,)
+            )
+            self._conn.commit()
+        return self.get_space(inv["space_id"], user_id)
+
+    def list_space_invites(self, space_id: str, user_id: str) -> Optional[List[Dict[str, Any]]]:
+        with self._lock:
+            member = self._conn.execute(
+                "SELECT role FROM space_memberships WHERE space_id=? AND user_id=? AND role IN ('owner','admin')",
+                (space_id, user_id)
+            ).fetchone()
+            if not member:
+                return None
+            rows = self._conn.execute(
+                "SELECT * FROM space_invites WHERE space_id=? ORDER BY created_at DESC",
+                (space_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def revoke_invite(self, space_id: str, invite_id: str, user_id: str) -> bool:
+        with self._lock:
+            member = self._conn.execute(
+                "SELECT role FROM space_memberships WHERE space_id=? AND user_id=? AND role IN ('owner','admin')",
+                (space_id, user_id)
+            ).fetchone()
+            if not member:
+                return False
+            cursor = self._conn.execute(
+                "DELETE FROM space_invites WHERE id=? AND space_id=?",
+                (invite_id, space_id)
+            )
+            self._conn.commit()
+        return cursor.rowcount > 0
+
