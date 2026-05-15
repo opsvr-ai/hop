@@ -801,6 +801,14 @@ class APIServerAdapter(BasePlatformAdapter):
     def _extract_space_id(self, request: "web.Request") -> Optional[str]:
         return request.headers.get("X-Hermes-Space", "").strip() or None
 
+    def _check_space_access(self, request: "web.Request", item_space_id: Optional[str]) -> bool:
+        """Return True if the request's space matches the item's space_id.
+        Items without a space_id (legacy) are accessible from any space."""
+        if item_space_id is None:
+            return True
+        current = self._extract_space_id(request)
+        return current == item_space_id
+
     def _require_user(self, request: "web.Request") -> str:
         user_id = self._extract_user_id(request)
         if not user_id:
@@ -2415,6 +2423,12 @@ class APIServerAdapter(BasePlatformAdapter):
         try:
             include_disabled = request.query.get("include_disabled", "").lower() in {"true", "1"}
             jobs = _cron_list(include_disabled=include_disabled)
+            current_space = self._extract_space_id(request)
+            if current_space:
+                jobs = [
+                    j for j in jobs
+                    if (j.get("origin") or {}).get("space_id") in (None, current_space)
+                ]
             return web.json_response({"jobs": jobs})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
@@ -2457,6 +2471,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 "name": name,
                 "deliver": deliver,
             }
+            space_id = self._extract_space_id(request)
+            if space_id:
+                kwargs["origin"] = {"space_id": space_id}
             if skills:
                 kwargs["skills"] = skills
             if repeat is not None:
@@ -2481,6 +2498,9 @@ class APIServerAdapter(BasePlatformAdapter):
         try:
             job = _cron_get(job_id)
             if not job:
+                return web.json_response({"error": "Job not found"}, status=404)
+            job_space = (job.get("origin") or {}).get("space_id")
+            if not self._check_space_access(request, job_space):
                 return web.json_response({"error": "Job not found"}, status=404)
             return web.json_response({"job": job})
         except Exception as e:
@@ -2512,9 +2532,13 @@ class APIServerAdapter(BasePlatformAdapter):
                 return web.json_response(
                     {"error": f"Prompt must be ≤ {self._MAX_PROMPT_LENGTH} characters"}, status=400,
                 )
-            job = _cron_update(job_id, sanitized)
-            if not job:
+            existing = _cron_get(job_id)
+            if not existing:
                 return web.json_response({"error": "Job not found"}, status=404)
+            job_space = (existing.get("origin") or {}).get("space_id")
+            if not self._check_space_access(request, job_space):
+                return web.json_response({"error": "Job not found"}, status=404)
+            job = _cron_update(job_id, sanitized)
             return web.json_response({"job": job})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
@@ -2531,9 +2555,13 @@ class APIServerAdapter(BasePlatformAdapter):
         if id_err:
             return id_err
         try:
-            success = _cron_remove(job_id)
-            if not success:
+            existing = _cron_get(job_id)
+            if not existing:
                 return web.json_response({"error": "Job not found"}, status=404)
+            job_space = (existing.get("origin") or {}).get("space_id")
+            if not self._check_space_access(request, job_space):
+                return web.json_response({"error": "Job not found"}, status=404)
+            _cron_remove(job_id)
             return web.json_response({"ok": True})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
@@ -2550,9 +2578,13 @@ class APIServerAdapter(BasePlatformAdapter):
         if id_err:
             return id_err
         try:
-            job = _cron_pause(job_id)
-            if not job:
+            existing = _cron_get(job_id)
+            if not existing:
                 return web.json_response({"error": "Job not found"}, status=404)
+            job_space = (existing.get("origin") or {}).get("space_id")
+            if not self._check_space_access(request, job_space):
+                return web.json_response({"error": "Job not found"}, status=404)
+            job = _cron_pause(job_id)
             return web.json_response({"job": job})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
@@ -2569,9 +2601,13 @@ class APIServerAdapter(BasePlatformAdapter):
         if id_err:
             return id_err
         try:
-            job = _cron_resume(job_id)
-            if not job:
+            existing = _cron_get(job_id)
+            if not existing:
                 return web.json_response({"error": "Job not found"}, status=404)
+            job_space = (existing.get("origin") or {}).get("space_id")
+            if not self._check_space_access(request, job_space):
+                return web.json_response({"error": "Job not found"}, status=404)
+            job = _cron_resume(job_id)
             return web.json_response({"job": job})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
@@ -2588,9 +2624,13 @@ class APIServerAdapter(BasePlatformAdapter):
         if id_err:
             return id_err
         try:
-            job = _cron_trigger(job_id)
-            if not job:
+            existing = _cron_get(job_id)
+            if not existing:
                 return web.json_response({"error": "Job not found"}, status=404)
+            job_space = (existing.get("origin") or {}).get("space_id")
+            if not self._check_space_access(request, job_space):
+                return web.json_response({"error": "Job not found"}, status=404)
+            job = _cron_trigger(job_id)
             return web.json_response({"job": job})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
@@ -2913,6 +2953,7 @@ class APIServerAdapter(BasePlatformAdapter):
         run_id = f"run_{uuid.uuid4().hex}"
         session_id = body.get("session_id") or stored_session_id or run_id
         approval_session_key = gateway_session_key or session_id or run_id
+        space_id = self._extract_space_id(request)
         ephemeral_system_prompt = instructions
         loop = asyncio.get_running_loop()
         q: "asyncio.Queue[Optional[Dict]]" = asyncio.Queue()
@@ -2943,6 +2984,7 @@ class APIServerAdapter(BasePlatformAdapter):
             created_at=created_at,
             session_id=session_id,
             model=body.get("model", self._model_name),
+            space_id=space_id,
         )
 
         async def _run_and_close():
@@ -3141,6 +3183,12 @@ class APIServerAdapter(BasePlatformAdapter):
                 _openai_error(f"Run not found: {run_id}", code="run_not_found"),
                 status=404,
             )
+        run_space = status.get("space_id")
+        if not self._check_space_access(request, run_space):
+            return web.json_response(
+                _openai_error(f"Run not found: {run_id}", code="run_not_found"),
+                status=404,
+            )
         return web.json_response(status)
 
     async def _handle_run_events(self, request: "web.Request") -> "web.StreamResponse":
@@ -3150,6 +3198,13 @@ class APIServerAdapter(BasePlatformAdapter):
             return auth_err
 
         run_id = request.match_info["run_id"]
+        status = self._run_statuses.get(run_id)
+        run_space = status.get("space_id") if status else None
+        if not self._check_space_access(request, run_space):
+            return web.json_response(
+                _openai_error(f"Run not found: {run_id}", code="run_not_found"),
+                status=404,
+            )
 
         # Allow subscribing slightly before the run is registered (race condition window)
         for _ in range(20):
@@ -3202,6 +3257,12 @@ class APIServerAdapter(BasePlatformAdapter):
         run_id = request.match_info["run_id"]
         status = self._run_statuses.get(run_id)
         if status is None:
+            return web.json_response(
+                _openai_error(f"Run not found: {run_id}", code="run_not_found"),
+                status=404,
+            )
+        run_space = status.get("space_id")
+        if not self._check_space_access(request, run_space):
             return web.json_response(
                 _openai_error(f"Run not found: {run_id}", code="run_not_found"),
                 status=404,
@@ -3285,6 +3346,11 @@ class APIServerAdapter(BasePlatformAdapter):
             return auth_err
 
         run_id = request.match_info["run_id"]
+        status = self._run_statuses.get(run_id)
+        run_space = status.get("space_id") if status else None
+        if not self._check_space_access(request, run_space):
+            return web.json_response(_openai_error(f"Run not found: {run_id}", code="run_not_found"), status=404)
+
         agent = self._active_run_agents.get(run_id)
         task = self._active_run_tasks.get(run_id)
 
