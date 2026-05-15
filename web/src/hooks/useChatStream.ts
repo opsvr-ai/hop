@@ -147,8 +147,11 @@ export function useChatStream(opts: UseChatStreamOptions = {}) {
       const controller = new AbortController();
       abortRef.current = controller;
 
-      // Build API messages from the ref snapshot
-      const priorMessages = messagesRef.current;
+      // Build API messages from the ref snapshot — cap at last 40 messages
+      // (20 turns) to keep request payload and LLM context bounded.
+      // When session continuity is active the backend loads full history from DB.
+      const MAX_API_MSGS = 40;
+      const priorMessages = messagesRef.current.slice(-MAX_API_MSGS);
       const apiMessages = [...priorMessages, userMsg].map((m) => {
         // Build multimodal content array if message has image attachments
         if (m.attachments && m.attachments.some((a) => a.type === "image")) {
