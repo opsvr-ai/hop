@@ -37,6 +37,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 try:
@@ -624,6 +625,11 @@ class APIServerAdapter(BasePlatformAdapter):
         self._agent_cache_lock = threading.Lock()
         self._agent_cache_max = int(os.getenv("HERMES_AGENT_CACHE_MAX", "32"))
         self._agent_cache_ttl = int(os.getenv("HERMES_AGENT_CACHE_TTL", "600"))
+        # Dedicated thread pool for agent execution (avoids unbounded default executor)
+        self._agent_executor = ThreadPoolExecutor(
+            max_workers=int(os.getenv("HERMES_AGENT_POOL_SIZE", "4")),
+            thread_name_prefix="hermes-agent-",
+        )
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -2851,7 +2857,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 result["session_id"] = _eff_sid
             return result, usage
 
-        return await loop.run_in_executor(None, _run)
+        return await loop.run_in_executor(self._agent_executor, _run)
 
     # ------------------------------------------------------------------
     # /v1/runs — structured event streaming
@@ -4136,6 +4142,9 @@ class APIServerAdapter(BasePlatformAdapter):
             await self._runner.cleanup()
             self._runner = None
         self._app = None
+        # Shut down the agent thread pool gracefully
+        if hasattr(self, "_agent_executor"):
+            self._agent_executor.shutdown(wait=True, cancel_futures=False)
         logger.info("[%s] API server stopped", self.name)
 
     async def send(
