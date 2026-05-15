@@ -29,7 +29,7 @@ interface MemoryData {
     message_count: number;
     preview: string;
   }>;
-  providers: Array<{
+  providers?: Array<{
     name: string;
     type: string;
   }>;
@@ -246,13 +246,13 @@ export default function MemoryPage() {
           icon={History}
           label="会话历史"
           value={`${data.sessions.length} 个`}
-          sub={data.providers.length > 0 ? `${data.providers.length} providers` : "本地存储"}
+          sub={data.providers && data.providers.length > 0 ? `${data.providers.length} providers` : "本地存储"}
           colorClass="bg-violet-50 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400"
         />
       </div>
 
       {/* Providers (if any) */}
-      {data.providers.length > 0 && (
+      {data.providers && data.providers.length > 0 && (
         <div className="flex flex-wrap gap-1.5 items-center">
           <span className="text-[0.65rem] text-muted-foreground mr-1">
             外部 Providers:

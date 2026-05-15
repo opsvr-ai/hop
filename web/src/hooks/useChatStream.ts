@@ -347,10 +347,21 @@ export function useChatStream(opts: UseChatStreamOptions = {}) {
     abortRef.current?.abort();
   }, []);
 
+  const loadMessages = useCallback((msgs: ChatMessage[]) => {
+    setMessages(msgs);
+    if (msgs.length > 0) {
+      const maxNum = msgs.reduce((max, m) => {
+        const match = m.id.match(/-(\d+)$/);
+        return match ? Math.max(max, parseInt(match[1], 10)) : max;
+      }, 0);
+      msgCounter = maxNum;
+    }
+  }, []);
+
   const clearMessages = useCallback(() => {
     setMessages([]);
     msgCounter = 0;
   }, []);
 
-  return { messages, isLoading, sendMessage, stop, clearMessages };
+  return { messages, isLoading, sendMessage, stop, loadMessages, clearMessages };
 }

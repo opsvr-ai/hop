@@ -3452,7 +3452,112 @@ class APIServerAdapter(BasePlatformAdapter):
         user = db.create_local_user(username, pw_hash, display_name=username, is_admin=1)
         return web.json_response({"ok": True, "user": {"id": user["id"], "username": user["username"]}})
 
-    async def _handle_auth_ldap(self, request: "web.Request") -> "web.Response":
+    async def _handle_sessions_list(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        db = self._ensure_session_db()
+        if db is None:
+            return web.json_response({"sessions": []})
+        limit = min(int(request.query.get("limit", "30")), 100)
+        source = request.query.get("source")
+        sessions = db.search_sessions(source=source, limit=limit * 2)  # oversample to get enough after filter
+
+        def _title(s):
+            t = s.get("title")
+            if t and t.strip():
+                return t.strip()
+            sid = s.get("id", "")
+            if sid.startswith("api-"):
+                return f"API对话 {sid[4:12]}"
+            if sid.startswith("cron_job-"):
+                return f"定时任务 {sid[9:]}"
+            return sid[:30]
+
+        def _message_count(s):
+            return s.get("message_count") or 0
+
+        filtered = [s for s in sessions if _message_count(s) > 0 or s.get("source") == "api_server"]
+        displayed = filtered[:limit]
+
+        return web.json_response({
+            "sessions": [
+                {
+                    "id": s["id"],
+                    "source": s.get("source", ""),
+                    "title": _title(s),
+                    "started_at": s.get("started_at", 0),
+                    "message_count": _message_count(s),
+                }
+                for s in displayed
+            ]
+        })
+
+    async def _handle_session_detail(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        session_id = request.match_info["session_id"]
+        db = self._ensure_session_db()
+        if db is None:
+            return web.json_response({"error": "Database unavailable"}, status=500)
+        try:
+            messages = db.get_messages_as_conversation(session_id)
+        except Exception:
+            messages = []
+        return web.json_response({
+            "session_id": session_id,
+            "messages": messages,
+        })
+
+    async def _handle_session_update(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        session_id = request.match_info["session_id"]
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        title = (body.get("title") or "").strip()
+        db = self._ensure_session_db()
+        if db is None:
+            return web.json_response({"error": "Database unavailable"}, status=500)
+        try:
+            ok = db.set_session_title(session_id, title)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        if not ok:
+            return web.json_response({"error": "Session not found"}, status=404)
+        return web.json_response({"session_id": session_id, "title": title or None})
+
+    async def _handle_memory(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        db = self._ensure_session_db()
+        sessions = []
+        if db:
+            recent = db.search_sessions(limit=20)
+            sessions = [
+                {
+                    "id": s["id"],
+                    "source": s.get("source", ""),
+                    "model": s.get("model", ""),
+                    "title": s.get("title", ""),
+                    "started_at": s.get("started_at", 0),
+                    "message_count": s.get("message_count", 0),
+                    "preview": (s.get("title") or "未命名对话"),
+                }
+                for s in recent
+            ]
+        return web.json_response({
+            "memory": {"entries": [], "usage": "0%", "entry_count": 0, "char_limit": 100000},
+            "user": {"entries": [], "usage": "0%", "entry_count": 0, "char_limit": 50000},
+            "sessions": sessions,
+        })
+
+    async def _handle_auth_ldap(self, request: "web.Request") -> "web.Request":
         try:
             body = await request.json()
         except Exception:
@@ -3833,6 +3938,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/health", self._handle_health)
             self._app.router.add_get("/health/detailed", self._handle_health_detailed)
             self._app.router.add_get("/v1/health", self._handle_health)
+            self._app.router.add_get("/v1/health/detailed", self._handle_health_detailed)
             self._app.router.add_get("/v1/models", self._handle_models)
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
@@ -3848,6 +3954,15 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/api/jobs/{job_id}/pause", self._handle_pause_job)
             self._app.router.add_post("/api/jobs/{job_id}/resume", self._handle_resume_job)
             self._app.router.add_post("/api/jobs/{job_id}/run", self._handle_run_job)
+            # /v1-prefixed aliases for dashboard proxy
+            self._app.router.add_get("/v1/jobs", self._handle_list_jobs)
+            self._app.router.add_post("/v1/jobs", self._handle_create_job)
+            self._app.router.add_get("/v1/jobs/{job_id}", self._handle_get_job)
+            self._app.router.add_patch("/v1/jobs/{job_id}", self._handle_update_job)
+            self._app.router.add_delete("/v1/jobs/{job_id}", self._handle_delete_job)
+            self._app.router.add_post("/v1/jobs/{job_id}/pause", self._handle_pause_job)
+            self._app.router.add_post("/v1/jobs/{job_id}/resume", self._handle_resume_job)
+            self._app.router.add_post("/v1/jobs/{job_id}/run", self._handle_run_job)
             # Structured event streaming
             self._app.router.add_post("/v1/runs", self._handle_runs)
             self._app.router.add_get("/v1/runs/{run_id}", self._handle_get_run)
@@ -3860,6 +3975,10 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/v1/auth/ldap", self._handle_auth_ldap)
             self._app.router.add_post("/v1/auth/local", self._handle_auth_local)
             self._app.router.add_get("/v1/auth/has-admin", self._handle_auth_has_admin)
+            self._app.router.add_get("/v1/sessions", self._handle_sessions_list)
+            self._app.router.add_get("/v1/sessions/{session_id}", self._handle_session_detail)
+            self._app.router.add_patch("/v1/sessions/{session_id}", self._handle_session_update)
+            self._app.router.add_get("/v1/memory", self._handle_memory)
 
             # ── User endpoints ──
             self._app.router.add_get("/v1/users/me", self._handle_users_me)

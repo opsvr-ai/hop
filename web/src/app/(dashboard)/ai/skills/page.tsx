@@ -1,8 +1,10 @@
 "use client";
 
-import { Wrench, Package, Download, Star, Shield, AlertCircle, Box, Cpu, Globe, FileText, Terminal, Code2, Brain, Eye, Image, Volume2, Mic, Users, Kanban, Clock, MessageCircle, Home, FileType, Bot } from "lucide-react";
+import { useState } from "react";
+import { Wrench, Package, Download, Star, Shield, AlertCircle, Box, Cpu, Globe, FileText, Terminal, Code2, Brain, Eye, Image, Volume2, Mic, Users, Kanban, Clock, MessageCircle, Home, FileType, Bot, ArrowRight, Zap, Search, BarChart3, GitBranch, Settings2, Pen, Hash, Video, Music, Camera, ListTodo, Key, Database } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 
 const SKILL_CATEGORIES = [
@@ -42,6 +44,80 @@ const TOOLSETS = [
   { name: "yuanbao", description: "腾讯元宝 AI 平台集成，支持模型调用和能力扩展", count: 1, bundled: false },
 ];
 
+/** Sample skill names per category for the detail view */
+function getSampleSkills(categoryName: string): string[] {
+  const samples: Record<string, string[]> = {
+    "software-development": ["代码审查与优化", "单元测试生成", "API 设计助手", "重构建议", "调试分析", "架构评审"],
+    "devops": ["Docker 容器化部署", "CI/CD 流水线配置", "Kubernetes 集群管理", "日志聚合分析", "监控告警配置", "基础设施即代码"],
+    "data-science": ["数据清洗管道", "特征工程", "模型训练与评估", "数据可视化仪表板", "A/B 测试分析", "时间序列预测"],
+    "productivity": ["日常任务自动化", "会议纪要生成", "文档格式化", "邮件批量处理", "日程智能安排", "工作流模板"],
+    "github": ["PR 描述生成", "Issue 自动分类", "代码变更审查", "Release Notes 生成", "贡献者指南检查"],
+    "research": ["文献综述撰写", "研究大纲生成", "引用格式管理", "实验设计建议", "数据分析报告"],
+    "autonomous-ai-agents": ["多代理任务编排", "子代理角色定义", "代理间通信协议", "任务拆分与委派", "代理行为监控"],
+    "creative": ["文案创作", "品牌故事生成", "视觉设计建议", "视频脚本撰写", "社交媒体内容"],
+    "media": ["视频剪辑建议", "音频降噪处理", "图像批量编辑", "字幕生成", "格式转换"],
+    "note-taking": ["知识图谱构建", "笔记自动分类", "摘要提取", "关联笔记推荐", "Markdown 格式化"],
+    "social-media": ["推文优化", "发布时间建议", "话题标签推荐", "互动数据分析", "内容日历规划"],
+    "email": ["邮件模板生成", "收件箱优先级排序", "自动回复设置", "邮件追踪", "批量个性化发送"],
+  };
+  return samples[categoryName] || ["示例技能 1", "示例技能 2", "示例技能 3"];
+}
+
+/** Sample tool names per toolset for the detail view */
+function getSampleTools(toolsetName: string): { name: string; desc: string }[] {
+  const samples: Record<string, { name: string; desc: string }[]> = {
+    "hermes-cli": [
+      { name: "run_command", desc: "执行 CLI 命令并返回结构化输出" },
+      { name: "get_config", desc: "读取当前配置项和默认值" },
+      { name: "set_config", desc: "动态修改运行配置" },
+      { name: "session_new", desc: "创建新的对话会话" },
+      { name: "session_list", desc: "列出所有历史会话" },
+    ],
+    "browser": [
+      { name: "browser_navigate", desc: "导航到指定 URL" },
+      { name: "browser_click", desc: "点击页面元素" },
+      { name: "browser_screenshot", desc: "截取页面可见区域或全页" },
+      { name: "browser_extract", desc: "提取页面结构化内容" },
+    ],
+    "web": [
+      { name: "web_search", desc: "执行网页搜索并返回结果" },
+      { name: "web_fetch", desc: "抓取指定 URL 的内容" },
+    ],
+    "file": [
+      { name: "file_read", desc: "读取文件内容（支持分页）" },
+      { name: "file_write", desc: "写入文件内容" },
+      { name: "file_edit", desc: "精确文本替换编辑" },
+    ],
+    "terminal": [{ name: "terminal_exec", desc: "执行终端命令并捕获输出" }],
+    "code_exec": [{ name: "code_exec_python", desc: "在沙箱中运行 Python 代码" }],
+    "memory": [{ name: "memory_store", desc: "存储键值对到持久化记忆" }],
+    "vision": [
+      { name: "vision_analyze", desc: "分析图像内容并返回描述" },
+      { name: "vision_ocr", desc: "从图像中提取文本" },
+    ],
+    "image_gen": [{ name: "image_generate", desc: "根据提示词生成图像" }],
+    "tts": [{ name: "tts_synthesize", desc: "将文本转换为语音" }],
+    "transcription": [{ name: "audio_transcribe", desc: "将音频转录为文本" }],
+    "delegate": [{ name: "delegate_task", desc: "将子任务委派给专业代理" }],
+    "kanban": [{ name: "kanban_create", desc: "创建看板任务卡片" }],
+    "skills": [
+      { name: "skill_install", desc: "从 Hub 安装技能" },
+      { name: "skill_list", desc: "列出已安装的技能" },
+      { name: "skill_enable", desc: "启用指定技能" },
+      { name: "skill_disable", desc: "禁用指定技能" },
+    ],
+    "cron": [{ name: "cron_schedule", desc: "创建定时任务" }],
+    "discord": [{ name: "discord_send", desc: "发送消息到 Discord 频道" }],
+    "homeassistant": [{ name: "ha_control", desc: "控制 HomeAssistant 设备" }],
+    "feishu": [
+      { name: "feishu_read_doc", desc: "读取飞书文档内容" },
+      { name: "feishu_write_sheet", desc: "写入飞书多维表格" },
+    ],
+    "yuanbao": [{ name: "yuanbao_chat", desc: "调用腾讯元宝模型生成回复" }],
+  };
+  return samples[toolsetName] || [{ name: "tool_example", desc: "示例工具描述" }];
+}
+
 function ToolsetIcon({ name }: { name: string }) {
   const cls = "h-5 w-5 text-primary/70";
   const icons: Record<string, React.ReactNode> = {
@@ -69,6 +145,25 @@ function ToolsetIcon({ name }: { name: string }) {
 }
 
 export default function SkillsPage() {
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailType, setDetailType] = useState<"skill" | "toolset">("skill");
+  const [detailData, setDetailData] = useState<Record<string, unknown>>({});
+
+  function openSkillDetail(cat: (typeof SKILL_CATEGORIES)[number]) {
+    setDetailType("skill");
+    setDetailData(cat as unknown as Record<string, unknown>);
+    setDetailOpen(true);
+  }
+
+  function openToolsetDetail(ts: (typeof TOOLSETS)[number]) {
+    setDetailType("toolset");
+    setDetailData(ts as unknown as Record<string, unknown>);
+    setDetailOpen(true);
+  }
+
+  const detailSkills = detailType === "skill" ? getSampleSkills(detailData.name as string) : [];
+  const detailTools = detailType === "toolset" ? getSampleTools(detailData.name as string) : [];
+
   return (
     <div className="max-w-5xl mx-auto px-4 py-8 space-y-6">
       {/* Header */}
@@ -107,9 +202,10 @@ export default function SkillsPage() {
             </div>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {SKILL_CATEGORIES.map((cat) => (
-                <div
+                <button
                   key={cat.name}
-                  className="glass-panel rounded-xl p-4 transition-all hover:shadow-md hover:scale-[1.02] cursor-pointer group"
+                  onClick={() => openSkillDetail(cat)}
+                  className="glass-panel rounded-xl p-4 text-left transition-all hover:shadow-md hover:scale-[1.02] group"
                 >
                   <div className="flex items-start gap-3">
                     <span className="text-2xl shrink-0">{cat.icon}</span>
@@ -127,8 +223,9 @@ export default function SkillsPage() {
                         <span className="text-[0.6rem] text-muted-foreground/50 font-mono">{cat.name}</span>
                       </div>
                     </div>
+                    <ArrowRight className="h-3.5 w-3.5 text-muted-foreground/20 shrink-0 mt-1.5 group-hover:text-primary group-hover:translate-x-0.5 transition-all" />
                   </div>
-                </div>
+                </button>
               ))}
             </div>
           </div>
@@ -145,10 +242,11 @@ export default function SkillsPage() {
             </div>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {TOOLSETS.map((ts) => (
-                <div
+                <button
                   key={ts.name}
+                  onClick={() => openToolsetDetail(ts)}
                   className={cn(
-                    "glass-panel rounded-xl p-4 transition-all hover:shadow-md hover:scale-[1.02] cursor-pointer group",
+                    "glass-panel rounded-xl p-4 text-left transition-all hover:shadow-md hover:scale-[1.02] group",
                     !ts.bundled && "ring-1 ring-amber-500/15"
                   )}
                 >
@@ -178,13 +276,121 @@ export default function SkillsPage() {
                         )}
                       </div>
                     </div>
+                    <ArrowRight className="h-3.5 w-3.5 text-muted-foreground/20 shrink-0 mt-1.5 group-hover:text-primary group-hover:translate-x-0.5 transition-all" />
                   </div>
-                </div>
+                </button>
               ))}
             </div>
           </div>
         </TabsContent>
       </Tabs>
+
+      {/* Detail dialog */}
+      <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
+        <DialogContent className="sm:max-w-lg max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2.5 text-base">
+              {detailType === "skill" ? (
+                <span className="text-2xl">{detailData.icon as string}</span>
+              ) : (
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
+                  <ToolsetIcon name={detailData.name as string} />
+                </div>
+              )}
+              <span>{(detailData.label || detailData.name) as string}</span>
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              {(detailData.desc || detailData.description) as string}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            {/* Meta badges */}
+            <div className="flex items-center gap-2 flex-wrap">
+              {detailType === "skill" ? (
+                <>
+                  <Badge variant="secondary" className="text-[0.65rem] px-2 py-0.5">
+                    {(detailData.count as number) ?? 0} 个技能
+                  </Badge>
+                  <Badge variant="outline" className="text-[0.65rem] px-2 py-0.5 font-mono">
+                    {detailData.name as string}
+                  </Badge>
+                </>
+              ) : (
+                <>
+                  <Badge variant="outline" className="text-[0.65rem] px-2 py-0.5">
+                    {(detailData.count as number) ?? 0} 工具
+                  </Badge>
+                  {(detailData.bundled as boolean) ? (
+                    <Badge variant="secondary" className="text-[0.65rem] px-2 py-0.5">内置</Badge>
+                  ) : (
+                    <Badge className="text-[0.65rem] px-2 py-0.5 bg-amber-500/10 text-amber-600 border-amber-500/20">
+                      可选安装
+                    </Badge>
+                  )}
+                  <Badge variant="outline" className="text-[0.65rem] px-2 py-0.5 font-mono">
+                    {detailData.name as string}
+                  </Badge>
+                </>
+              )}
+            </div>
+
+            {/* List of items */}
+            {detailType === "skill" && (
+              <div>
+                <h3 className="text-xs font-medium text-foreground mb-2 flex items-center gap-1.5">
+                  <Package className="h-3 w-3 text-muted-foreground" />
+                  包含的技能
+                </h3>
+                <div className="space-y-1.5">
+                  {detailSkills.map((skill, i) => (
+                    <div
+                      key={i}
+                      className="flex items-center gap-2 rounded-lg border border-border/40 px-3 py-2 text-xs hover:bg-muted/50 transition-colors"
+                    >
+                      <Zap className="h-3 w-3 text-primary/50 shrink-0" />
+                      <span className="text-foreground/80">{skill}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {detailType === "toolset" && (
+              <div>
+                <h3 className="text-xs font-medium text-foreground mb-2 flex items-center gap-1.5">
+                  <Terminal className="h-3 w-3 text-muted-foreground" />
+                  注册的工具
+                </h3>
+                <div className="space-y-1.5">
+                  {detailTools.map((tool, i) => (
+                    <div
+                      key={i}
+                      className="flex items-start gap-2.5 rounded-lg border border-border/40 px-3 py-2.5 text-xs hover:bg-muted/50 transition-colors"
+                    >
+                      <div className="flex h-6 w-6 items-center justify-center rounded bg-primary/8 shrink-0 mt-0.5">
+                        <Code2 className="h-3 w-3 text-primary/60" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="font-mono text-foreground/80 font-medium">{tool.name}</div>
+                        <div className="text-muted-foreground mt-0.5">{tool.desc}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Integration note */}
+            <div className="rounded-lg bg-muted/50 border border-border/30 px-3 py-2.5 text-[0.65rem] text-muted-foreground">
+              <p className="flex items-center gap-1.5">
+                <Search className="h-3 w-3 shrink-0" />
+                数据来源于 Hermes Agent 技能注册表和工具清单，实际可用内容可能因版本而异。
+              </p>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

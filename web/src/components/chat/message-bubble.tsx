@@ -77,7 +77,7 @@ function extractText(children: React.ReactNode): string {
   if (typeof children === "string") return children;
   if (Array.isArray(children)) return children.map(extractText).join("");
   if (children && typeof children === "object" && "props" in children) {
-    return extractText((children as React.ReactElement).props.children);
+    return extractText((children as React.ReactElement<{ children?: React.ReactNode }>).props.children);
   }
   return "";
 }
@@ -115,7 +115,7 @@ const markdownComponents: MarkdownComponents = {
   },
   pre: ({ children, ...props }: any) => {
     // If the child <code> has a language class, wrap in CodeBlock
-    const codeChild = children as React.ReactElement | undefined;
+    const codeChild = children as React.ReactElement<{ className?: string; children?: React.ReactNode }> | undefined;
     if (codeChild?.props?.className?.includes("language-")) {
       return <CodeBlock {...codeChild.props} />;
     }

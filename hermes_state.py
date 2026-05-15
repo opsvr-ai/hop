@@ -604,14 +604,18 @@ class SessionDB:
         """
         cursor = self._conn.cursor()
 
-        cursor.executescript(SCHEMA_SQL)
-
         # ── Declarative column reconciliation ──────────────────────────
         # Diff live tables against SCHEMA_SQL and ADD any missing columns.
         # This is idempotent and self-healing: even if a version-gated
         # migration was skipped (e.g. due to version renumbering), the
         # column gets created here.
+        #
+        # Must run BEFORE executescript so any indexes created by SCHEMA_SQL
+        # that reference newly-added columns (e.g. idx_sessions_space_id)
+        # will succeed — the column must exist before the index is created.
         self._reconcile_columns(cursor)
+
+        cursor.executescript(SCHEMA_SQL)
 
         # ── Schema version bookkeeping ─────────────────────────────────
         # Bump to current so future data migrations (if any) can gate on

@@ -4,11 +4,11 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { signOut, useSession } from "next-auth/react";
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -44,7 +44,6 @@ import {
   Puzzle,
   ShieldCheck,
   Activity,
-  History,
 } from "lucide-react";
 import { useState, useCallback } from "react";
 
@@ -82,7 +81,6 @@ const SECTIONS: SectionDef[] = [
       { href: "/ai/memory", label: "记忆", icon: Brain },
       { href: "/ai/skills", label: "技能工具", icon: Wrench },
       { href: "/ai/jobs", label: "定时任务", icon: Clock },
-      { href: "/ai/sessions", label: "会话历史", icon: History },
       { href: "/ai/analytics", label: "使用分析", icon: Activity },
     ],
   },
@@ -174,13 +172,13 @@ export function Sidebar() {
       {/* New conversation */}
       {!collapsed && (
         <div className="px-2 pt-3 pb-2">
-          <Link
-            href="/chat"
+          <button
+            onClick={() => router.push("/chat?new=1")}
             className="flex items-center gap-2.5 w-full rounded-lg border border-sidebar-border px-3 py-2 text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-foreground transition-colors"
           >
             <Plus className="h-4 w-4" />
             <span className="truncate">新对话</span>
-          </Link>
+          </button>
         </div>
       )}
 
@@ -247,39 +245,39 @@ export function Sidebar() {
       {/* User footer */}
       <div className="border-t border-sidebar-border p-2">
         <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              className={cn(
-                "flex w-full items-center rounded-md transition-colors hover:bg-sidebar-accent",
-                collapsed ? "justify-center px-2 py-1.5" : "gap-3 px-2 py-1.5",
-              )}
-            >
-              <Avatar className="h-7 w-7 shrink-0">
-                <AvatarImage src={session?.user?.image ?? ""} />
-                <AvatarFallback className="text-[0.65rem] bg-sidebar-accent text-sidebar-foreground">
-                  {userInitials}
-                </AvatarFallback>
-              </Avatar>
-              {!collapsed && (
-                <div className="flex-1 truncate text-left">
-                  <div className="text-xs font-medium truncate">
-                    {session?.user?.name || "用户"}
-                  </div>
-                  <div className="text-[0.6rem] text-sidebar-foreground/50 truncate">
-                    {session?.user?.email}
-                  </div>
+          <DropdownMenuTrigger
+            className={cn(
+              "flex w-full items-center rounded-md transition-colors hover:bg-sidebar-accent",
+              collapsed ? "justify-center px-2 py-1.5" : "gap-3 px-2 py-1.5",
+            )}
+          >
+            <Avatar className="h-7 w-7 shrink-0">
+              <AvatarImage src={session?.user?.image ?? ""} />
+              <AvatarFallback className="text-[0.65rem] bg-sidebar-accent text-sidebar-foreground">
+                {userInitials}
+              </AvatarFallback>
+            </Avatar>
+            {!collapsed && (
+              <div className="flex-1 truncate text-left">
+                <div className="text-xs font-medium truncate">
+                  {session?.user?.name || "用户"}
                 </div>
-              )}
-            </button>
+                <div className="text-[0.6rem] text-sidebar-foreground/50 truncate">
+                  {session?.user?.email}
+                </div>
+              </div>
+            )}
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" side="top" className="w-56">
-            <DropdownMenuLabel>账户</DropdownMenuLabel>
-            <DropdownMenuItem
-              onClick={() => router.push("/settings/api-key")}
-            >
-              <Key className="mr-2 h-4 w-4" />
-              API Key 设置
-            </DropdownMenuItem>
+            <DropdownMenuGroup>
+              <DropdownMenuLabel>账户</DropdownMenuLabel>
+              <DropdownMenuItem
+                onClick={() => router.push("/settings/api-key")}
+              >
+                <Key className="mr-2 h-4 w-4" />
+                API Key 设置
+              </DropdownMenuItem>
+            </DropdownMenuGroup>
             <DropdownMenuSeparator />
             <DropdownMenuItem
               className="text-destructive"
@@ -309,14 +307,8 @@ export function Sidebar() {
       {/* Mobile sidebar */}
       <div className="flex items-center gap-2 border-b px-3 py-2 lg:hidden bg-sidebar text-sidebar-foreground">
         <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
-          <SheetTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 text-sidebar-foreground"
-            >
-              <Menu className="h-5 w-5" />
-            </Button>
+          <SheetTrigger className="h-8 w-8 inline-flex items-center justify-center rounded-lg text-sidebar-foreground hover:bg-muted hover:text-foreground transition-colors">
+            <Menu className="h-5 w-5" />
           </SheetTrigger>
           <SheetContent
             side="left"

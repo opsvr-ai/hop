@@ -1,10 +1,11 @@
 "use client";
 
 import { useRef, useEffect, useState, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import { useChatStream } from "@/hooks/useChatStream";
 import { MessageBubble } from "@/components/chat/message-bubble";
 import { ChatInput } from "@/components/chat/chat-input";
-import { Bot, Search, ShieldAlert, Zap, PanelLeft, MessageSquare, Clock } from "lucide-react";
+import { Bot, Search, ShieldAlert, Zap, PanelLeft, MessageSquare, Clock, Pencil, Terminal, Radio, Send } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -22,6 +23,14 @@ interface SessionItem {
   message_count: number;
 }
 
+function sessionIcon(source: string) {
+  if (source === "cron_job" || source === "cronjob") return Clock;
+  if (source === "telegram" || source === "discord") return Send;
+  if (source === "cli" || source === "terminal") return Terminal;
+  if (source === "api_server") return Radio;
+  return MessageSquare;
+}
+
 function formatTime(ts: number | null | undefined): string {
   if (!ts) return "";
   try {
@@ -37,11 +46,15 @@ function formatTime(ts: number | null | undefined): string {
 }
 
 export default function ChatPage() {
-  const { messages, isLoading, sendMessage, stop, clearMessages } = useChatStream();
+  const { messages, isLoading, sendMessage, stop, loadMessages, clearMessages } = useChatStream();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [historyOpen, setHistoryOpen] = useState(true);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [loadingSession, setLoadingSession] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editTitle, setEditTitle] = useState("");
 
   const fetchSessions = useCallback(async () => {
     try {
@@ -54,7 +67,76 @@ export default function ChatPage() {
     finally { setSessionsLoading(false); }
   }, []);
 
+  const searchParams = useSearchParams();
+
   useEffect(() => { fetchSessions(); }, [fetchSessions]);
+
+  // Detect ?new=1 from sidebar "新对话" button — start fresh chat
+  useEffect(() => {
+    if (searchParams.get("new") === "1") {
+      clearMessages();
+      setActiveSessionId(null);
+      window.history.replaceState(null, "", "/chat");
+    }
+  }, [searchParams, clearMessages]);
+
+  async function loadSession(sessionId: string) {
+    if (sessionId === activeSessionId) return;
+    setLoadingSession(true);
+    setActiveSessionId(sessionId);
+    try {
+      const res = await fetch(`/api/hermes/sessions/${sessionId}`);
+      if (!res.ok) throw new Error("Failed to load session");
+      const data = await res.json();
+      const msgs = (data.messages || []).map((m: { role: string; content: string }, i: number) => ({
+        id: `hist-${sessionId.slice(0, 8)}-${i}`,
+        role: m.role as "user" | "assistant" | "system",
+        content: m.content || "",
+        createdAt: new Date(),
+      }));
+      loadMessages(msgs);
+    } catch {
+      setActiveSessionId(null);
+    } finally {
+      setLoadingSession(false);
+    }
+  }
+
+  function startRename(session: SessionItem) {
+    setEditingId(session.id);
+    setEditTitle(session.title || "");
+  }
+
+  function cancelRename() {
+    setEditingId(null);
+    setEditTitle("");
+  }
+
+  async function saveRename(sessionId: string) {
+    const title = editTitle.trim();
+    if (!title || title === sessions.find((s) => s.id === sessionId)?.title) {
+      cancelRename();
+      return;
+    }
+    try {
+      const res = await fetch(`/api/hermes/sessions/${sessionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      if (res.ok) {
+        setSessions((prev) =>
+          prev.map((s) => (s.id === sessionId ? { ...s, title } : s)),
+        );
+      }
+    } catch { /* silent */ }
+    cancelRename();
+  }
+
+  function handleNewChat() {
+    clearMessages();
+    setActiveSessionId(null);
+  }
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -90,27 +172,76 @@ export default function ChatPage() {
               暂无对话历史
             </p>
           ) : (
-            sessions.map((s) => (
-              <button
+            sessions.map((s) => {
+              const Icon = sessionIcon(s.source);
+              const isEditing = editingId === s.id;
+              return (
+              <div
                 key={s.id}
-                className="w-full text-left rounded-md px-2.5 py-2 text-xs transition-colors text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground group"
+                className={cn(
+                  "group relative rounded-md",
+                  s.id === activeSessionId
+                    ? "bg-sidebar-accent text-sidebar-foreground font-medium"
+                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground",
+                )}
               >
-                <div className="flex items-center gap-1.5">
-                  <MessageSquare className="h-3 w-3 text-muted-foreground/40 shrink-0" />
-                  <span className="truncate font-medium">
-                    {s.title || "未命名对话"}
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 mt-0.5 ml-4.5">
-                  <span className="text-[0.6rem] text-muted-foreground/50">
-                    {formatTime(s.started_at)}
-                  </span>
-                  <span className="text-[0.6rem] text-muted-foreground/40">
-                    {s.message_count}条
-                  </span>
-                </div>
-              </button>
-            ))
+                {isEditing ? (
+                  <div className="px-2.5 py-2">
+                    <div className="flex items-center gap-1.5">
+                      <Icon className="h-3 w-3 text-muted-foreground/50 shrink-0" />
+                      <input
+                        autoFocus
+                        value={editTitle}
+                        onChange={(e) => setEditTitle(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") saveRename(s.id);
+                          if (e.key === "Escape") cancelRename();
+                        }}
+                        onBlur={() => saveRename(s.id)}
+                        className="flex-1 bg-transparent border-b border-primary/40 text-xs outline-none min-w-0 text-sidebar-foreground"
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => loadSession(s.id)}
+                    disabled={loadingSession}
+                    className="w-full text-left rounded-md px-2.5 py-2 text-xs transition-colors"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      {s.id === activeSessionId && loadingSession ? (
+                        <Clock className="h-3 w-3 text-primary/60 shrink-0 animate-spin" />
+                      ) : (
+                        <Icon className="h-3 w-3 text-muted-foreground/40 shrink-0" />
+                      )}
+                      <span className="truncate font-medium">
+                        {s.title || "未命名对话"}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 mt-0.5 ml-4.5">
+                      <span className="text-[0.6rem] text-muted-foreground/50">
+                        {formatTime(s.started_at)}
+                      </span>
+                      <span className="text-[0.6rem] text-muted-foreground/40">
+                        {s.message_count}条
+                      </span>
+                    </div>
+                  </button>
+                )}
+                {!isEditing && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      startRename(s);
+                    }}
+                    className="absolute right-1 top-1 p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-sidebar-accent transition-opacity"
+                  >
+                    <Pencil className="h-2.5 w-2.5 text-muted-foreground/40" />
+                  </button>
+                )}
+              </div>
+            );
+            })
           )}
         </div>
       </div>
@@ -177,10 +308,10 @@ export default function ChatPage() {
                     <span className="text-sm font-medium text-foreground">智能运维对话</span>
                   </div>
                   <button
-                    onClick={clearMessages}
+                    onClick={handleNewChat}
                     className="text-xs text-muted-foreground hover:text-foreground transition-colors"
                   >
-                    清空对话
+                    新对话
                   </button>
                 </div>
 

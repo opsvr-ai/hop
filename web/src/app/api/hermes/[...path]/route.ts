@@ -29,7 +29,7 @@ async function proxyRequest(
 
   const headers = buildHeaders();
   if (session?.user) {
-    headers["X-Hermes-User"] = (session.user as any).username || session.user.email || "unknown";
+    headers["X-Hermes-User"] = (session.user as any).id || session.user.email || "unknown";
     const spaceId = (session as any).currentSpaceId;
     if (spaceId) {
       headers["X-Hermes-Space"] = spaceId;
