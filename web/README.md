@@ -1,48 +1,36 @@
-# Hermes Agent — Web UI
+This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
-Browser-based dashboard for managing Hermes Agent configuration, API keys, and monitoring active sessions.
+## Getting Started
 
-## Stack
-
-- **Vite** + **React 19** + **TypeScript**
-- **Tailwind CSS v4** with custom dark theme
-- **shadcn/ui**-style components (hand-rolled, no CLI dependency)
-
-## Development
+First, run the development server:
 
 ```bash
-# Start the backend API server
-cd ../
-python -m hermes_cli.main web --no-open
-
-# In another terminal, start the Vite dev server (with HMR + API proxy)
-cd web/
 npm run dev
+# or
+yarn dev
+# or
+pnpm dev
+# or
+bun dev
 ```
 
-The Vite dev server proxies `/api` requests to `http://127.0.0.1:9119` (the FastAPI backend).
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
-## Build
+You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
-```bash
-npm run build
-```
+This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
-This outputs to `../hermes_cli/web_dist/`, which the FastAPI server serves as a static SPA. The built assets are included in the Python package via `pyproject.toml` package-data.
+## Learn More
 
-## Structure
+To learn more about Next.js, take a look at the following resources:
 
-```
-src/
-├── components/ui/   # Reusable UI primitives (Card, Badge, Button, Input, etc.)
-├── lib/
-│   ├── api.ts       # API client — typed fetch wrappers for all backend endpoints
-│   └── utils.ts     # cn() helper for Tailwind class merging
-├── pages/
-│   ├── StatusPage   # Agent status, active/recent sessions
-│   ├── ConfigPage   # Dynamic config editor (reads schema from backend)
-│   └── EnvPage      # API key management with save/clear
-├── App.tsx          # Main layout and navigation
-├── main.tsx         # React entry point
-└── index.css        # Tailwind imports and theme variables
-```
+- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
+- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+
+You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+
+## Deploy on Vercel
+
+The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+
+Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.

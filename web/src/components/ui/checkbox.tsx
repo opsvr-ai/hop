@@ -1,61 +1,29 @@
-import { cn } from "@/lib/utils";
-import { Check } from "lucide-react";
+"use client"
 
-interface CheckboxProps
-  extends Omit<React.InputHTMLAttributes<HTMLInputElement>, "type"> {
-  label?: React.ReactNode;
-}
+import { Checkbox as CheckboxPrimitive } from "@base-ui/react/checkbox"
 
-export function Checkbox({
-  className,
-  label,
-  id,
-  checked,
-  defaultChecked,
-  ...props
-}: CheckboxProps) {
-  // Support both controlled (checked prop) and uncontrolled (defaultChecked) usage.
-  // For visual rendering, prefer `checked` if provided; otherwise fall back to defaultChecked.
-  const isChecked = checked ?? defaultChecked ?? false;
+import { cn } from "@/lib/utils"
+import { CheckIcon } from "lucide-react"
 
+function Checkbox({ className, ...props }: CheckboxPrimitive.Root.Props) {
   return (
-    <label
-      htmlFor={id}
+    <CheckboxPrimitive.Root
+      data-slot="checkbox"
       className={cn(
-        "group flex items-center gap-2.5 cursor-pointer select-none",
-        props.disabled && "cursor-not-allowed opacity-50",
+        "peer relative flex size-4 shrink-0 items-center justify-center rounded-[4px] border border-input transition-colors outline-none group-has-disabled/field:opacity-50 after:absolute after:-inset-x-3 after:-inset-y-2 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 aria-invalid:aria-checked:border-primary dark:bg-input/30 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 data-checked:border-primary data-checked:bg-primary data-checked:text-primary-foreground dark:data-checked:bg-primary",
+        className
       )}
+      {...props}
     >
-      <span
-        className={cn(
-          "flex h-4 w-4 shrink-0 items-center justify-center transition-all",
-          "border bg-background/40",
-          // Focus-visible ring for keyboard accessibility
-          "group-has-[:focus-visible]:ring-2 group-has-[:focus-visible]:ring-ring group-has-[:focus-visible]:ring-offset-1",
-          isChecked
-            ? "border-foreground bg-foreground/20"
-            : "border-border group-hover:border-foreground/40",
-          className,
-        )}
+      <CheckboxPrimitive.Indicator
+        data-slot="checkbox-indicator"
+        className="grid place-content-center text-current transition-none [&>svg]:size-3.5"
       >
-        <Check
-          className={cn(
-            "h-3 w-3 transition-opacity",
-            isChecked
-              ? "text-foreground opacity-100"
-              : "text-foreground opacity-0",
-          )}
+        <CheckIcon
         />
-      </span>
-      <input
-        type="checkbox"
-        id={id}
-        checked={checked}
-        defaultChecked={checked === undefined ? defaultChecked : undefined}
-        className="sr-only"
-        {...props}
-      />
-      {label && <span className="text-sm">{label}</span>}
-    </label>
-  );
+      </CheckboxPrimitive.Indicator>
+    </CheckboxPrimitive.Root>
+  )
 }
+
+export { Checkbox }
